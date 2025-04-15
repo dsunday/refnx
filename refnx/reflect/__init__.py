@@ -20,6 +20,7 @@ from refnx.reflect.structure import (
     MagneticSlab,
     Component,
     sld_profile,
+    isld_profile,
     Stack,
     MaterialSLD,
     MixedSlab,

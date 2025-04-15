@@ -2103,6 +2103,98 @@ def sld_profile(slabs, z=None, max_delta_z=None):
 
     return zed, sld
 
+def isld_profile(slabs, z=None, max_delta_z=None):
+    """
+    Calculates an SLD profile, as a function of distance through the
+    interface.
+
+    Parameters
+    ----------
+    slabs : :class:`np.ndarray`
+        Slab representation of this structure.
+        Has shape (N, 5).
+
+        - slab[N, 0]
+           thickness of layer N
+        - slab[N, 1]
+           *overall* SLD.real of layer N (material AND solvent)
+        - slab[N, 2]
+           *overall* SLD.imag of layer N (material AND solvent)
+        - slab[N, 3]
+           roughness between layer N and N-1
+        - slab[N, 4]
+           volume fraction of solvent in layer N, *ignored* for this function
+
+    z : {None, `np.ndarray`}, optional
+        If `z is None` then the SLD profile will have 500 points (unless
+        `max_delta_z` is specified).
+        If `z` is an array, then the array specifies the interfacial locations
+        at which the SLD will be evaluated.
+
+    max_delta_z : {None, float}, optional
+        If specified this will control the maximum spacing between SLD points.
+        Only used if `z is None`.
+
+    Returns
+    -------
+    sld : float
+        Scattering length density / 1e-6 Angstrom**-2
+
+    Notes
+    -----
+    This can be called in vectorised fashion.
+    """
+    nlayers = np.size(slabs, 0) - 2
+
+    # work on a copy of the input array
+    layers = np.copy(slabs)
+    layers[:, 0] = np.fabs(slabs[:, 0])
+    layers[:, 3] = np.fabs(slabs[:, 3])
+    # bounding layers should have zero thickness
+    layers[0, 0] = layers[-1, 0] = 0
+
+    # distance of each interface from the fronting interface
+    dist = np.cumsum(layers[:-1, 0])
+    zstart = -5 - 4 * np.fabs(slabs[1, 3])
+    zend = 5 + dist[-1] + 4 * layers[-1, 3]
+
+    # workout how much space the SLD profile should encompass
+    # (if z array not provided)
+    if z is None:
+        npnts = 500
+        if max_delta_z is not None:
+            max_delta_z = float(max_delta_z)
+            npnts_deltaz = int(np.ceil((zend - zstart) / max_delta_z)) + 1
+
+            npnts = max(500, npnts_deltaz)
+
+        zed = np.linspace(zstart, zend, num=npnts)
+    else:
+        zed = np.asfarray(z)
+
+    # the output array
+    isld = np.ones_like(zed, dtype=float) * layers[0, 1]
+
+    # work out the step in SLD at an interface
+    delta_irho = layers[1:, 2] - layers[:-1, 2]
+
+    # use erf for roughness function, but step if the roughness is zero
+    step_f = Step()
+    erf_f = Erf()
+    sigma = layers[1:, 3]
+
+    # accumulate the SLD of each step.
+    for i in range(nlayers + 1):
+        f = erf_f
+        if sigma[i] == 0:
+            f = step_f
+        isld += delta_irho[i] * f(zed, scale=sigma[i], loc=dist[i])
+
+    return zed, isld
+
+
+
+
 
 def create_occupancy(structure, solvent_slab=-1):
     """
