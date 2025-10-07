@@ -36,7 +36,7 @@ try:
 except ImportError:
     from refnx.reflect import _reflect as refcalc
 
-from refnx._lib import flatten
+from refnx._lib import flatten, possibly_open_file
 from refnx.analysis import Parameters, Parameter, possibly_create_parameter
 from refnx.analysis.parameter import BaseParameter
 from refnx.reflect.interface import Interface, Erf, Step
@@ -578,8 +578,8 @@ class Structure(UserList):
         if (
             (slabs is None)
             or (len(slabs) < 2)
-            or (not isinstance(self.data[0], Slab))
-            or (not isinstance(self.data[-1], Slab))
+            or (not isinstance(self.data[0], (Slab, MagneticSlab)))
+            or (not isinstance(self.data[-1], (Slab, MagneticSlab)))
         ):
             raise ValueError(
                 "Structure requires fronting and backing"
@@ -809,6 +809,7 @@ class Structure(UserList):
         model : :class:`orso.fileio.model_language.SampleModel`
         """
         from orsopy.fileio import model_language as ml
+        from orsopy.fileio import ComplexValue
 
         defaults = ml.ModelParameters(
             length_unit="angstrom", sld_unit="1/angstrom^2"
@@ -827,7 +828,7 @@ class Structure(UserList):
                 )
             else:
                 _csld = complex(comp.sld) * 1e-6
-                _csld = ml.ComplexValue(_csld.real, _csld.imag)
+                _csld = ComplexValue(_csld.real, _csld.imag)
                 mat = ml.Material(sld=_csld)
 
             if comp.name:
@@ -855,7 +856,7 @@ class Structure(UserList):
 
         Parameters
         ----------
-        sample_model : :class:`orso.fileio.model_language.SampleModel`
+        sample_model : {:class:`orso.fileio.model_language.SampleModel`, str, file-like}
 
         Returns
         -------
@@ -869,17 +870,54 @@ class Structure(UserList):
         >>> model = SampleModel(**dct)
 
         """
+        from orsopy.fileio import model_language
+        from orsopy.slddb.material import Material as _Material
+        from orsopy.slddb.material import get_element
+        from orsopy.utils.chemical_formula import Formula as _Formula
+
+        import yaml
+
+        if isinstance(sample_model, model_language.SampleModel):
+            pass
+        else:
+            with possibly_open_file(sample_model) as f:
+                dtxt = yaml.safe_load(f)
+                if "data_source" in dtxt:
+                    dtxt = dtxt["data_source"]
+                if "sample" in dtxt:
+                    dtxt = dtxt["sample"]["model"]
+                sample_model = model_language.SampleModel(**dtxt)
+
         layers = sample_model.resolve_to_layers()
+
         s = Structure()
 
         for layer in layers:
             mat = layer.material
             if mat.formula is not None:
-                sld = MaterialSLD(
-                    mat.formula,
-                    density=mat.mass_density.magnitude,
-                    name=layer.original_name,
-                )
+                # force number density calculation
+                mat.generate_density()
+                if mat.mass_density is not None:
+                    sld = MaterialSLD(
+                        mat.formula,
+                        density=mat.mass_density.magnitude,
+                        name=layer.original_name,
+                    )
+                elif mat.number_density is not None:
+                    formula = _Formula(mat.formula, strict=True)
+                    material = _Material(
+                        [
+                            (get_element(element), amount)
+                            for element, amount in formula
+                        ],
+                        fu_dens=mat.number_density.as_unit("1/angstrom^3"),
+                    )
+                    density = material.dens
+                    sld = MaterialSLD(
+                        mat.formula, density=density, name=layer.original_name
+                    )
+                else:
+                    sld = SLD(mat.get_sld() * 1e6)
             else:
                 sld = SLD(mat.get_sld() * 1e6, name=layer.original_name)
 
@@ -910,6 +948,7 @@ def overall_sld(slabs, solvent):
     averaged_slabs : np.ndarray
         the averaged slabs.
     """
+    slabs = np.copy(slabs)
     slabs[..., 1:3] *= (1 - slabs[..., 4])[..., np.newaxis]
     slabs[..., 1] += solvent.real * slabs[..., 4]
     slabs[..., 2] += solvent.imag * slabs[..., 4]

@@ -11,7 +11,7 @@ build-backend = "setuptools.build_meta"
 name = "refnx"
 authors = [{name="Andrew Nelson", email="andyfaff+refnx@gmail.com"}]
 description = "Neutron and X-ray Reflectometry Analysis"
-license = {text = "BSD-3-Clause"}
+license = "BSD-3-Clause"
 readme = "README.md"
 requires-python = ">=3.9"
 dynamic = ["version"]
@@ -19,7 +19,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Science/Research",
-    "License :: Public Domain",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering",
@@ -27,7 +26,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-    "numpy>=1.25.0",
+    "numpy>=1.26.4",
     "scipy",
     "orsopy",
 ]
@@ -48,8 +47,8 @@ all = [
     "h5py",
     "jupyter",
     "tqdm",
-    "pymc; python_version != '3.13'",
-    "pytensor; python_version != '3.13'",
+    "pymc",
+    "pytensor",
     "attrs",
     "pandas",
     "pyparsing",
@@ -57,7 +56,7 @@ all = [
     "pyqt6",
     "qtpy",
     "corner",
-    "numba; python_version != '3.13'",
+    "numba",
 ]
 
 test = [

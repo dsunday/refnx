@@ -2,6 +2,7 @@
 Component for studying lipid membranes at an interface
 """
 
+import warnings
 import numpy as np
 from scipy.optimize import NonlinearConstraint
 from refnx.reflect import Component, SLD, ReflectModel, Structure
@@ -371,7 +372,7 @@ class LipidLeaflet(Component):
 
 class LipidLeafletGuest(LipidLeaflet):
     r"""
-    Describes a lipid leaflet Component at an interface
+    Describes a lipid leaflet Component at an interface with an incorporated guest molecule.
 
     Parameters
     ----------
@@ -400,20 +401,38 @@ class LipidLeafletGuest(LipidLeaflet):
         the roughness between the preceding component and the heads, if
         `reverse_monolayer is True` then this is the roughness between the
         preceding component and the tails.
-    phi_guest: float or refnx.analysis.Parameter
-        Guest assumed to lie fully in the tail layer. This is a fractional
+    phi_guest_h: float or refnx.analysis.Parameter
+        Guest lying in the head layer. This is a fractional
         value representing how much of the space **not** taken up by the lipid
-        is occupied by the guest molecule. The absolute volume fraction is
-        available from the `LipidLeafletGuest.volfrac_guest` property.
+        is occupied by the guest molecule.
+        If, however, `absolute_phi` is set to True, then this parameter
+        represents the absolute value of the guest molecule in the head region.
+        The absolute volume fraction is always available from the
+        `LipidLeafletGuest.volfrac_guest_h` property.
+        Please see the notes section for further details.
 
         .. warning::
-           This parameter may not be determinable with low uncertainty if
-           the lipid tails occupy nearly all of the tail region, there will be
-           little remaining space for the guest to occupy. For best results
+           This parameter may not be determinable with low uncertainty if the lipid
+           occupies nearly all of the space in the layer. For best results
+           the guest and tail region should have very different SLDs.
+
+    phi_guest_t: float or refnx.analysis.Parameter
+        Guest lying in the tail layer. This is a fractional
+        value representing how much of the space **not** taken up by the lipid
+        is occupied by the guest molecule.
+        If, however, `absolute_phi` is set to True, then this parameter
+        represents the absolute value of the guest molecule in the tail region.
+        The absolute volume fraction is always
+        available from the `LipidLeafletGuest.volfrac_guest_t` property.
+        Please see the notes section for further details.
+
+        .. warning::
+           This parameter may not be determinable with low uncertainty if the lipid
+           occupies nearly all of the space in the layer. For best results
            the guest and tail region should have very different SLDs.
 
     sld_guest: None, float, complex, refnx.reflect.SLD
-        Guest is fully in the tail layer.
+        SLD of guest molecule.
     head_solvent: None, float, complex, refnx.reflect.SLD
         Solvent for the head region. If `None`, then solvation will be
         performed by the parent `Structure`, using the `Structure.solvent`
@@ -433,16 +452,47 @@ class LipidLeafletGuest(LipidLeaflet):
         closer to the backing medium.
     name: str, optional
         The name for the component
+    absolute_phi: bool, optional
+        Specifies whether `phi_guest_h` and `phi_guest_t` represent fractional
+        or absolute volume fractions.
+        Please see the notes section for further details.
 
     Notes
     -----
     The sum of coherent scattering lengths must be in Angstroms, the volume
     must be in cubic Angstroms. This is because the SLD of a tail group is
-    calculated as `b_tails / vm_tails * 1e6` to achieve the units
+    calculated as ``b_tails / vm_tails * 1e6`` to achieve the units
     10**6 Angstrom**-2.
+
+    `phi_guest_t` and `phi_guest_h` represent either a fractional (what
+    fraction not occupied by lipid is occupied by guest) or absolute
+    volume fraction of guest in a layer. If ``absolute_phi is False`` then
+    the absolute volume fraction of guest in a layer is calculated as::
+
+        volfrac_guest_x = (1 - volfrac_x) * phi_guest_x
+
+    where ``volfrac_x`` is the absolute volume fraction of lipid in the head
+    group region (x representing either the head (h) or tail region (t)).
+    The amount of solvent in that layer is then calculated as::
+
+        vfsolv = 1 - volfrac_guest_x - volfrac_x
+
+    If ``absolute_phi is `True`` then `phi_guest_x` is regarded as an
+    absolute volume fraction (not relative) and
+    ``volfrac_guest_x == phi_guest_x``. ``absolute_phi`` is useful when
+    one wants to constrain the volume fraction of guest in the head and
+    tail layers to be the same. Otherwise, setting `absolute_phi` to be
+    False is preferred, as each layer is less likely to be overfilled.
+    Appropriate constraints and bounds must be used during the modelling
+    process to ensure ``volfrac_guest_x + volfrac_x <=1``.
+    For optimisation using `differential_evolution` this entails
+    using the :meth:`LipidLeafletGuest.make_constraints` method to create
+    those constraints. Please see `using constraints`_ for an example.
+    With MCMC the log-prior term becomes `-np.inf` (i.e. impossible).
+
+    .. _using constraints: https://refnx.readthedocs.io/en/latest/inequality_constraints.html#inequality-constraints-with-differential-evolution
     """
 
-    # TODO: use SLD of head instead of b_heads, vm_heads?
     def __init__(
         self,
         apm,
@@ -454,72 +504,15 @@ class LipidLeafletGuest(LipidLeaflet):
         thickness_tails,
         rough_head_tail,
         rough_preceding_mono,
-        phi_guest,
+        phi_guest_h,
+        phi_guest_t,
         sld_guest,
         head_solvent=None,
         tail_solvent=None,
         reverse_monolayer=False,
         name="",
+        absolute_phi=False,
     ):
-        """
-        Parameters
-        ----------
-        apm: float or Parameter
-            Area per molecule
-        b_heads: float, Parameter or complex
-            Sum of coherent scattering lengths of head group (Angstrom)
-        vm_heads: float or Parameter
-            Molecular volume of head group (Angstrom**3)
-        thickness_heads: float or Parameter
-            Thickness of head group region (Angstrom)
-        b_tails: float, Parameter or complex
-            Sum of coherent scattering lengths of tail group (Angstrom)
-        vm_tails: float or Parameter
-            Molecular volume of tail group (Angstrom**3)
-        thickness_tails: float or Parameter
-            Thickness of head group region (Angstrom)
-        rough_head_tail: float or refnx.analysis.Parameter
-            Roughness of head-tail group (Angstrom)
-        rough_preceding_mono: float or Parameter
-            Roughness between preceding component (in the fronting direction)
-            and the monolayer (Angstrom). If `reverse_monolayer is False` then
-            this is the roughness between the preceding component and the
-            heads, if `reverse_monolayer is True` then this is the roughness
-            between the preceding component and the tails.
-        phi_guest: float or refnx.analysis.Parameter
-            Guest assumed to lie fully in the tail layer. This is a fractional
-            value representing how much of the space **not** taken up by the lipid
-            is occupied by the guest molecule. The absolute volume fraction is
-            available from the `LipidLeafletGuest.volfrac_guest` property.
-
-            .. warning::
-               This parameter may not be determinable with low uncertainty if
-               the lipid tails occupy nearly all of the tail region, there will be
-               little remaining space for the guest to occupy. For best results
-               the guest and tail region should have very different SLDs.
-
-        sld_guest: None, float, complex, refnx.reflect.SLD
-            SLD of the guest (10**-6 Angstrom**-2).
-        head_solvent: None, float, complex, SLD
-            Solvent for the head region. If `None`, then solvation will be
-            performed by the parent `Structure`, using the `Structure.solvent`
-            attribute. Other options are coerced to an `SLD` object using
-            `SLD(float | complex)`. A float/complex argument is the SLD of the
-            solvent (10**-6 Angstrom**-2).
-        tail_solvent: None, float, complex, SLD
-            Solvent for the tail region. If `None`, then solvation will be
-            performed by the parent `Structure`, using the `Structure.solvent`
-            attribute. Other options are coerced to an `SLD` object using
-            `SLD(float | complex)`. A float/complex argument is the SLD of the
-            solvent (10**-6 Angstrom**-2).
-        reverse_monolayer: bool, optional
-            The default is to have heads closer to the fronting medium and
-            tails closer to the backing medium. If `reverse_monolayer is True`
-            then the tails will be closer to the fronting medium and heads
-            closer to the backing medium.
-        name: str, optional
-            The name for the component
-        """
         super().__init__(
             apm,
             b_heads,
@@ -535,9 +528,21 @@ class LipidLeafletGuest(LipidLeaflet):
             reverse_monolayer=reverse_monolayer,
             name=name,
         )
-        self.phi_guest = possibly_create_parameter(phi_guest)
-        self.phi_guest.bounds.lb = 0
+        warnings.warn(
+            "LipidLeafletGuest changed in v0.1.60 to allow guest molecules"
+            " in the head region as well. The number AND order of parameters"
+            " has changed. Please double check your usage",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        self.phi_guest_h = possibly_create_parameter(phi_guest_h)
+        self.phi_guest_h.bounds.lb = 0
+        self.phi_guest_h.bounds.ub = 1
+        self.phi_guest_t = possibly_create_parameter(phi_guest_t)
+        self.phi_guest_t.bounds.lb = 0
+        self.phi_guest_t.bounds.ub = 1
         self.sld_guest = possibly_create_scatterer(sld_guest)
+        self.absolute_phi = absolute_phi
 
     def __repr__(self):
         sld_bh = SLD([self.b_heads_real, self.b_heads_imag])
@@ -553,12 +558,14 @@ class LipidLeafletGuest(LipidLeaflet):
             f"{self.thickness_tails!r}, "
             f"{self.rough_head_tail!r}, "
             f"{self.rough_preceding_mono!r}, "
-            f"{self.phi_guest!r}, "
+            f"{self.phi_guest_h!r}, "
+            f"{self.phi_guest_t!r}, "
             f"{self.sld_guest!r}, "
             f"head_solvent={self.head_solvent!r}, "
             f"tail_solvent={self.tail_solvent!r}, "
             f"reverse_monolayer={self.reverse_monolayer}, "
-            f"name={self.name!r})"
+            f"name={self.name!r}, "
+            f"absolute_phi={self.absolute_phi!r})"
         )
         return s
 
@@ -572,24 +579,33 @@ class LipidLeafletGuest(LipidLeaflet):
             The Structure hosting this Component
         """
         layers = np.zeros((2, 5))
+        _sld_guest = complex(self.sld_guest)
 
         # thicknesses
         layers[0, 0] = float(self.thickness_heads)
         layers[1, 0] = float(self.thickness_tails)
 
-        # real and imag SLD's
-        layers[0, 1] = float(self.b_heads_real) / float(self.vm_heads) * 1.0e6
-        layers[0, 2] = float(self.b_heads_imag) / float(self.vm_heads) * 1.0e6
+        # sld of guest and tail mixture. water is added on later
+        vfh = self.volfrac_h
+        vfhg = self.volfrac_guest_h
 
-        vft = self.volfrac_t
-        vfg = self.volfrac_guest
+        re_sld_head = float(self.b_heads_real) / float(self.vm_heads) * 1.0e6
+        im_sld_head = float(self.b_heads_imag) / float(self.vm_heads) * 1.0e6
+
+        den = vfh + vfhg
+        layers[0, 1] = (vfh * re_sld_head + vfhg * _sld_guest.real) / den
+        layers[0, 2] = (vfh * im_sld_head + vfhg * _sld_guest.imag) / den
 
         # sld of guest and tail mixture. water is added on later
+        vft = self.volfrac_t
+        vftg = self.volfrac_guest_t
+
         re_sld_tail = float(self.b_tails_real) / float(self.vm_tails) * 1.0e6
         im_sld_tail = float(self.b_tails_imag) / float(self.vm_tails) * 1.0e6
-        _sld_guest = complex(self.sld_guest)
-        layers[1, 1] = vft * re_sld_tail + vfg * _sld_guest.real
-        layers[1, 2] = vft * im_sld_tail + vfg * _sld_guest.imag
+
+        den = vft + vftg
+        layers[1, 1] = (vft * re_sld_tail + vftg * _sld_guest.real) / den
+        layers[1, 2] = (vft * im_sld_tail + vftg * _sld_guest.imag) / den
 
         # roughnesses
         layers[0, 3] = float(self.rough_preceding_mono)
@@ -597,8 +613,8 @@ class LipidLeafletGuest(LipidLeaflet):
 
         # volume fractions
         # head region
-        layers[0, 4] = 1 - self.volfrac_h
-
+        # calculate solvation amount
+        layers[0, 4] = 1 - vfh - vfhg
         if self.head_solvent is not None:
             _head_solvent = self.head_solvent.complex(
                 getattr(structure, "wavelength", None)
@@ -609,7 +625,7 @@ class LipidLeafletGuest(LipidLeaflet):
 
         # tail region
         # calculate solvation amount
-        layers[1, 4] = 1 - vft - vfg
+        layers[1, 4] = 1 - vft - vftg
         if self.tail_solvent is not None:
             _tail_solvent = self.tail_solvent.complex(
                 getattr(structure, "wavelength", None)
@@ -640,7 +656,8 @@ class LipidLeafletGuest(LipidLeaflet):
                 self.thickness_tails,
                 self.rough_head_tail,
                 self.rough_preceding_mono,
-                self.phi_guest,
+                self.phi_guest_h,
+                self.phi_guest_t,
             ]
         )
         p.append(self.sld_guest.parameters)
@@ -654,16 +671,73 @@ class LipidLeafletGuest(LipidLeaflet):
     def logp(self):
         # penalise unphysical volume fractions.
         if (
-            self.volfrac_h > 1
-            or self.volfrac_t > 1
-            or self.phi_guest.value > 1
+            self.phi_guest_h.value > 1
+            or self.phi_guest_t.value > 1
+            or self.volfrac_t + self.volfrac_guest_t > 1
+            or self.volfrac_h + self.volfrac_guest_h > 1
         ):
             return -np.inf
 
         return 0
 
+    def make_constraint(self, objective):
+        """
+        Creates a NonlinearConstraint for a LipidLeafletGuest, ensuring that
+        volume fraction of material in the head+tail regions lies in [0, 1].
+        Suitable for use by differential_evolution.
+
+        Parameters
+        ----------
+        objective: refnx.analysis.Objective
+            Objective containing the LipidLeafletGuest. Must be the Objective
+            that is being minimised by differential_evolution.
+
+        Returns
+        -------
+        nlc: NonlinearConstraint
+
+        Notes
+        -----
+        You must create separate constraints for each LipidLeafletGuest object
+        in your system.
+        The Objective you supply must be for the overall curve fitting system.
+        i.e. possibly a GlobalObjective.
+
+        Examples
+        --------
+        >>> # leaflet is a LipidLeafletGuest, used in an Objective, obj
+        >>> con = leaflet.make_constraint(obj)
+        >>> fitter = CurveFitter(obj)
+        >>> fitter.fit("differential_evolution", constraints=(con,))
+        """
+
+        def con(x):
+            objective.setp(x)
+            return (
+                self.volfrac_h + self.volfrac_guest_h,
+                self.volfrac_t + self.volfrac_guest_t,
+            )
+
+        return NonlinearConstraint(con, 0, 1)
+
     @property
-    def volfrac_guest(self):
-        # Absolute volume fraction of guest in the tail group region.
-        vft = self.volfrac_t
-        return (1.0 - vft) * self.phi_guest.value
+    def volfrac_guest_h(self):
+        """
+        Absolute volume fraction of guest in the head group region.
+        """
+        if self.absolute_phi:
+            return self.phi_guest_h.value
+        else:
+            vfh = self.volfrac_h
+            return (1.0 - vfh) * self.phi_guest_h.value
+
+    @property
+    def volfrac_guest_t(self):
+        """
+        Absolute volume fraction of guest in the tail group region.
+        """
+        if self.absolute_phi:
+            return self.phi_guest_t.value
+        else:
+            vft = self.volfrac_t
+            return (1.0 - vft) * self.phi_guest_t.value

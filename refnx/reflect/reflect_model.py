@@ -621,119 +621,6 @@ class ReflectModel:
         return self._parameters
 
 
-class PolarisedReflectModel(ReflectModel):
-    """
-    Extension of ReflectModel for polarised neutron reflectometry.
-    See `refnx.reflect.ReflectModel` for documentation of arguments.
-
-    Parameters
-    ----------
-    spin: refnx.reflect.SpinChannel
-        Specifies the spin state the model is associated with.
-    Aguide: float
-        Angle of applied field. This value should be 270 or 90 degrees for
-        the applied field to lie in the plane of the sample, perpendicular to
-        the beam propagation direction. For a magnetic moment to be parallel
-        or anti-parallel to the applied field `thetaM` should be 90 or -90 deg
-        respectively.
-    """
-
-    def __init__(
-        self,
-        structure,
-        scale=1,
-        bkg=1e-7,
-        name="",
-        dq=5.0,
-        threads=-1,
-        quad_order=17,
-        dq_type="pointwise",
-        q_offset=0,
-        spin=None,
-        Aguide=270,
-    ):
-        super().__init__(
-            structure,
-            name=name,
-            scale=scale,
-            bkg=bkg,
-            threads=threads,
-            quad_order=quad_order,
-            dq=dq,
-            dq_type=dq_type,
-            q_offset=q_offset,
-        )
-        self.spin = spin
-        self.Aguide = Aguide
-
-    def __repr__(self):
-        return (
-            f"PolarisedReflectModel({self._structure!r}, name={self.name!r},"
-            f" scale={self.scale!r}, bkg={self.bkg!r},"
-            f" dq={self.dq!r}, threads={self.threads},"
-            f" quad_order={self.quad_order!r}, dq_type={self.dq_type!r},"
-            f" q_offset={self.q_offset!r}, spin={self.spin!r}, Aguide={self.Aguide!r})"
-        )
-
-    def model(self, x, p=None, x_err=None):
-        r"""
-        Calculate the reflectivity of this model
-
-        Parameters
-        ----------
-        x : float or np.ndarray
-            q values for the calculation.
-            Units = Angstrom**-1
-        p : refnx.analysis.Parameters, optional
-            parameters required to calculate the model
-        x_err : {np.ndarray, float} optional
-            Specifies how the instrumental resolution smearing is carried out
-            for each of the points in `x`.
-            See :func:`refnx.reflect.reflectivity` for further details.
-
-        Returns
-        -------
-        reflectivity : np.ndarray
-            Calculated reflectivity
-
-        Notes
-        -----
-        If `x_err` is not provided then the calculation will fall back to
-        the constant dq/q smearing specified by the `dq` attribute of this
-        object.
-        """
-        if p is not None:
-            self.parameters.pvals = np.array(p)
-        if x_err is None or self.dq_type == "constant":
-            # fallback to what this object was constructed with
-            x_err = float(self.dq)
-
-        slabs = self.structure.slabs()
-        spin = self.spin
-        if slabs.shape[1] == 5:
-            # unpolarised for some reason
-            slabs = slabs[..., :4]
-            spin = None
-        if slabs.shape[1] == 7:
-            # polarised
-            slabs = np.take_along_axis(
-                slabs, np.array([0, 1, 2, 3, 5, 6])[None, :], axis=1
-            )
-
-        return reflectivity(
-            x,
-            slabs,
-            scale=self.scale.value,
-            bkg=self.bkg.value,
-            dq=x_err,
-            threads=self.threads,
-            quad_order=self.quad_order,
-            q_offset=self.q_offset,
-            spin=spin,
-            Aguide=self.Aguide,
-        )
-
-
 class ReflectModelTL(ReflectModel):
     r"""
     Calculates reflectivity using angle-of-incidence/wavelength.
@@ -769,13 +656,13 @@ class ReflectModelTL(ReflectModel):
 
         This value is turned into a Parameter during the construction of this
         object.
-    threads: int, optional
+    threads : int, optional
         Specifies the number of threads for parallel calculation. This
         option is only applicable if you are using the ``_creflect``
         module. The option is ignored if using the pure python calculator,
         ``_reflect``. If `threads == -1` then all available processors are
         used.
-    quad_order: int, optional
+    quad_order : int, optional
         the order of the Gaussian quadrature polynomial for doing the
         resolution smearing. default = 17. Don't choose less than 13. If
         quad_order == 'ultimate' then adaptive quadrature is used. Adaptive
@@ -784,17 +671,20 @@ class ReflectModelTL(ReflectModel):
         time. BUT it won't necessarily work across all samples. For
         example, 13 points may be fine for a thin layer, but will be
         atrocious at describing a multilayer with bragg peaks.
-    dq_type: {'pointwise', 'constant'}, optional
+    dq_type : {'pointwise', 'constant'}, optional
         Chooses whether pointwise or constant dQ/Q resolution smearing (see
         `dq` keyword) is used. To use pointwise smearing the `x_err` keyword
         provided to `Objective.model` method must be an array, otherwise the
         smearing falls back to 'constant'.
-    t_offset: float or refnx.analysis.Parameter, optional
+    t_offset : float or refnx.analysis.Parameter, optional
         Compensates for uncertainties in the angle at which the measurement is
         performed. A positive/negative `t_offset` corresponds to a situation
         where the measured t values (incident angle) may have been under/over
         estimated, and has the effect of shifting the calculated model to
         lower/higher effective q values.
+    footprint : refnx.reflect.Footprint
+        Corrects for overillumination of a sample. Should be a subclass of
+        `Footprint`.
 
     Example
     -------
@@ -821,8 +711,10 @@ class ReflectModelTL(ReflectModel):
         quad_order=17,
         dq_type="pointwise",
         t_offset=0,
+        footprint=None,
     ):
         self._t_offset = possibly_create_parameter(t_offset)
+        self.footprint = footprint
         super().__init__(
             structure,
             name=name,
@@ -903,6 +795,9 @@ class ReflectModelTL(ReflectModel):
                 R[msk] = abeles(q[msk], a_unique_slabs, threads=1)
 
         R *= self.scale.value
+        if self.footprint is not None:
+            R *= self.footprint(tl[:, 0] + self.t_offset.value)
+
         R += self.bkg.value
         return np.squeeze(R)
 
@@ -937,8 +832,49 @@ class ReflectModelTL(ReflectModel):
         p = Parameters(name="instrument parameters")
         p.extend([self.scale, self.bkg, self.dq, self.t_offset])
 
+        if self.footprint is not None:
+            p.extend(self.footprint.parameters.data)
+
         self._parameters = Parameters(name=self.name)
         self._parameters.extend([p, structure.parameters])
+
+
+class Footprint:
+    """
+    Calculates fraction of beam intercepted by a sample at different angles
+
+    Parameters
+    ----------
+    sample_length : {float, refnx.analysis.Parameter}
+        Transverse length of sample (mm)
+    beam_height : {float, refnx.analysis.Parameter}
+        Full width half maximum of gaussian beam height (mm)
+    """
+
+    def __init__(self, sample_length, beam_height):
+        self.sample_length = possibly_create_parameter(
+            sample_length, name="sample length"
+        )
+        self.beam_height = possibly_create_parameter(
+            beam_height, name="beam height"
+        )
+
+    def __call__(self, angle):
+        """
+        Calculates fraction of beam intercepted by a sample at different angles.
+
+        Parameters
+        ----------
+        angle : {np.ndarray, float}
+            angle of incidence (degrees)
+        """
+        return general.beamfrac(
+            self.beam_height.value, self.sample_length.value, angle
+        )
+
+    @property
+    def parameters(self):
+        return Parameters([self.sample_length, self.beam_height])
 
 
 def reflectivity(
@@ -952,6 +888,7 @@ def reflectivity(
     q_offset=0,
     spin=None,
     Aguide=270,
+    fkernel=None,
 ):
     r"""
     Abeles/Parratt formalism for calculating reflectivity from a stratified
@@ -1006,7 +943,7 @@ def reflectivity(
             for details.
 
         Note that this slab representation is slightly different to that returned by
-        `refnx.reflect.Structure.slabs()`.
+        :meth:`refnx.reflect.Structure.slabs()`.
     scale : float
         scale factor. All model values are multiplied by this value before
         the background is added
@@ -1028,7 +965,7 @@ def reflectivity(
            (PDF). `dq` will have the shape (qvals.shape, 2, M).  There are
            `M` points in the kernel. `dq[:, 0, :]` holds the q values for the
            kernel, `dq[:, 1, :]` gives the corresponding probability.
-    quad_order: int, optional
+    quad_order : int, optional
         the order of the Gaussian quadrature polynomial for doing the
         resolution smearing. default = 17. Don't choose less than 13. If
         quad_order == 'ultimate' then adaptive quadrature is used. Adaptive
@@ -1037,22 +974,25 @@ def reflectivity(
         time. BUT it won't necessarily work across all samples. For
         example, 13 points may be fine for a thin layer, but will be
         atrocious at describing a multilayer with bragg peaks.
-    threads: int, optional
+    threads : int, optional
         Specifies the number of threads for parallel calculation. This
         option is only applicable if you are using the ``_creflect``
         module. The option is ignored if using the pure python calculator,
         ``_reflect``. If `threads == -1` then all available processors are
         used.
-    q_offset: float or refnx.analysis.Parameter, optional
+    q_offset : float or refnx.analysis.Parameter, optional
         Compensates for uncertainties in the angle at which the measurement is
         performed. A positive/negative `q_offset` corresponds to a situation
         where the measured q values (incident angle) may have been under/over
         estimated, and has the effect of shifting the calculated model to
         lower/higher effective q values.
     spin: refnx.reflect.SpinChannel
-        The polarisation channel that is being calculated.
-    Aguide: float
-        Angle of applied field.
+        The polarisation channel that is being calculated. Ignored if
+        `fkernel` is provided.
+    Aguide : float
+        Angle of applied field. Ignored if `fkernel` is provided.
+    fkernel : callable
+        Direct specification of the reflectivity calculation kernel
 
     Example
     -------
@@ -1071,12 +1011,18 @@ def reflectivity(
     # cast q_offset to float, if it's a Parameter
     q_offset = float(q_offset)
 
-    if slabs.shape[1] == 4:
+    if fkernel is not None:
+        # a reflectivity calculation kernel has been specified, use that
+        pass
+    elif slabs.shape[1] == 4:
         fkernel = kernel
     elif slabs.shape[1] == 6:
         fkernel = _gepore_wrapper(spin, Aguide)
     else:
-        raise ValueError(f"slabs are wrong, {slabs.shape=}")
+        raise ValueError(
+            f"No reflectivity calculation kernel provided, or the slab"
+            f" representation is wrong for the default kernel, {slabs.shape=}"
+        )
 
     # constant dq/q smearing
     if isinstance(dq, numbers.Real) and float(dq) == 0:

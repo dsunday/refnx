@@ -3,7 +3,6 @@ import os
 from refnx.reflect.reflect_model import (
     ReflectModel,
     ReflectModelTL,
-    PolarisedReflectModel,
     reflectivity,
     MixedReflectModel,
     FresnelTransform,
@@ -12,6 +11,11 @@ from refnx.reflect.reflect_model import (
     available_backends,
     abeles,
     SpinChannel,
+    Footprint,
+)
+from refnx.reflect._polarised_reflect_model import (
+    PolarisedReflectModel,
+    pnr_data_and_generative,
 )
 from refnx.reflect.structure import (
     Structure,
@@ -66,7 +70,7 @@ except ImportError:
         def __init__(self):
             raise RuntimeError(
                 "To run Motofit you need to install"
-                " IPython, ipywidgets, traitlets,"
+                " IPython, ipywidgets, traitlets, ipympl, "
                 " matplotlib"
             )
 
