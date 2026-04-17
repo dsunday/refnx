@@ -10,7 +10,6 @@ from refnx.analysis.parameter import (
 from refnx._lib import flatten
 import refnx
 
-
 _imports = r"""#!/usr/bin/env python
 
 '''
@@ -283,7 +282,8 @@ def code_fragment(objective):
     except ImportError:
         pass
     finally:
-        return code_str
+        pass
+    return code_str
 
 
 def objective_fragment(i, objective):
