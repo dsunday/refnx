@@ -44,6 +44,14 @@ from refnx.analysis import (
 )
 from refnx.util import general
 
+try:
+    from refnx.reflect._creflect import gepore
+except ImportError:
+
+    def gepore(*args, **kwds):
+        raise RuntimeError("gepore is not available")
+
+
 # some definitions for resolution smearing
 _FWHM = 2 * np.sqrt(2 * np.log(2.0))
 _INTLIMIT = 3.5
@@ -124,17 +132,17 @@ def available_backends():
     except ImportError:
         pass
 
-    # try:
-    #     import jax as jax
-    #     from jax.config import config
-    #
-    #     config.update("jax_enable_x64", True)
-    #     from refnx.reflect._jax_reflect import abeles_jax
-    #
-    #     backends.append("jax")
-    # except Exception:
-    #     # importing jax would be a ModuleNotFoundError
-    #     pass
+    try:
+        import jax as jax
+        from jax import config
+
+        config.update("jax_enable_x64", True)
+        from refnx.reflect._jax_reflect import abeles_jax
+
+        backends.append("jax")
+    except Exception:
+        # importing jax would be a ModuleNotFoundError
+        pass
 
     return tuple(backends)
 
@@ -327,6 +335,9 @@ class SpinChannel(Enum):
     DOWN_UP = (0, 1)
     DOWN_DOWN = (0, 0)
 
+    def __repr__(self):
+        return f"SpinChannel.{self.name}"
+
 
 class ReflectModel:
     r"""
@@ -384,6 +395,8 @@ class ReflectModel:
         where the measured q values (incident angle) may have been under/over
         estimated, and has the effect of shifting the calculated model to
         lower/higher effective q values.
+    spin: refnx.reflect.SpinChannel
+        The polarisation channel that is being calculated.
     """
 
     def __init__(
@@ -552,9 +565,11 @@ class ReflectModel:
             # fallback to what this object was constructed with
             x_err = float(self.dq)
 
+        slabs = self.structure.slabs()[:, :4]
+
         return reflectivity(
             x,
-            self.structure.slabs()[..., :4],
+            slabs,
             scale=self.scale.value,
             bkg=self.bkg.value,
             dq=x_err,
@@ -641,13 +656,13 @@ class ReflectModelTL(ReflectModel):
 
         This value is turned into a Parameter during the construction of this
         object.
-    threads: int, optional
+    threads : int, optional
         Specifies the number of threads for parallel calculation. This
         option is only applicable if you are using the ``_creflect``
         module. The option is ignored if using the pure python calculator,
         ``_reflect``. If `threads == -1` then all available processors are
         used.
-    quad_order: int, optional
+    quad_order : int, optional
         the order of the Gaussian quadrature polynomial for doing the
         resolution smearing. default = 17. Don't choose less than 13. If
         quad_order == 'ultimate' then adaptive quadrature is used. Adaptive
@@ -656,17 +671,20 @@ class ReflectModelTL(ReflectModel):
         time. BUT it won't necessarily work across all samples. For
         example, 13 points may be fine for a thin layer, but will be
         atrocious at describing a multilayer with bragg peaks.
-    dq_type: {'pointwise', 'constant'}, optional
+    dq_type : {'pointwise', 'constant'}, optional
         Chooses whether pointwise or constant dQ/Q resolution smearing (see
         `dq` keyword) is used. To use pointwise smearing the `x_err` keyword
         provided to `Objective.model` method must be an array, otherwise the
         smearing falls back to 'constant'.
-    t_offset: float or refnx.analysis.Parameter, optional
+    t_offset : float or refnx.analysis.Parameter, optional
         Compensates for uncertainties in the angle at which the measurement is
         performed. A positive/negative `t_offset` corresponds to a situation
         where the measured t values (incident angle) may have been under/over
         estimated, and has the effect of shifting the calculated model to
         lower/higher effective q values.
+    footprint : refnx.reflect.Footprint
+        Corrects for overillumination of a sample. Should be a subclass of
+        `Footprint`.
 
     Example
     -------
@@ -693,8 +711,10 @@ class ReflectModelTL(ReflectModel):
         quad_order=17,
         dq_type="pointwise",
         t_offset=0,
+        footprint=None,
     ):
         self._t_offset = possibly_create_parameter(t_offset)
+        self.footprint = footprint
         super().__init__(
             structure,
             name=name,
@@ -736,28 +756,29 @@ class ReflectModelTL(ReflectModel):
         # x has to be (N, 2) x[:, 0] is the AOI, x[:, 1] is wavelength
         tl = np.atleast_2d(np.asarray(x))
         ls = tl[:, 1]
-        slabs = []
+        unique_slabs = []
         original_wavelength = self.structure.wavelength
 
+        # find unique wavelengths. Only those wavelengths will have
+        # different slab representations.
+        unq_lams = np.unique(ls)
+
         try:
-            for lam in ls:
+            for lam in unq_lams:
                 self.structure.wavelength = lam
-                slabs.append(self.structure.slabs()[..., :4])
+                unique_slabs.append(self.structure.slabs()[..., :4])
         finally:
             self.structure.wavelength = original_wavelength
 
         q = general.q(tl[:, 0] + self.t_offset.value, tl[:, 1])
-
         if x_err is None or self.dq_type == "constant":
             # fallback to what this object was constructed with
             x_err = q * float(self.dq) / 100.0
 
         qo = self.quad_order
 
-        unique_slabs, idxs, inverse_idxs = np.unique(
-            slabs, axis=0, return_index=True, return_inverse=True
-        )
-        msks = [np.squeeze(inverse_idxs) == idx for idx in idxs]
+        msks = [ls == unq_lam for unq_lam in unq_lams]
+
         R = np.empty_like(q)
         for msk, a_unique_slabs in zip(msks, unique_slabs):
             if np.count_nonzero(x_err[msk]):
@@ -774,6 +795,9 @@ class ReflectModelTL(ReflectModel):
                 R[msk] = abeles(q[msk], a_unique_slabs, threads=1)
 
         R *= self.scale.value
+        if self.footprint is not None:
+            R *= self.footprint(tl[:, 0] + self.t_offset.value)
+
         R += self.bkg.value
         return np.squeeze(R)
 
@@ -808,8 +832,49 @@ class ReflectModelTL(ReflectModel):
         p = Parameters(name="instrument parameters")
         p.extend([self.scale, self.bkg, self.dq, self.t_offset])
 
+        if self.footprint is not None:
+            p.extend(self.footprint.parameters.data)
+
         self._parameters = Parameters(name=self.name)
         self._parameters.extend([p, structure.parameters])
+
+
+class Footprint:
+    """
+    Calculates fraction of beam intercepted by a sample at different angles
+
+    Parameters
+    ----------
+    sample_length : {float, refnx.analysis.Parameter}
+        Transverse length of sample (mm)
+    beam_height : {float, refnx.analysis.Parameter}
+        Full width half maximum of gaussian beam height (mm)
+    """
+
+    def __init__(self, sample_length, beam_height):
+        self.sample_length = possibly_create_parameter(
+            sample_length, name="sample length"
+        )
+        self.beam_height = possibly_create_parameter(
+            beam_height, name="beam height"
+        )
+
+    def __call__(self, angle):
+        """
+        Calculates fraction of beam intercepted by a sample at different angles.
+
+        Parameters
+        ----------
+        angle : {np.ndarray, float}
+            angle of incidence (degrees)
+        """
+        return general.beamfrac(
+            self.beam_height.value, self.sample_length.value, angle
+        )
+
+    @property
+    def parameters(self):
+        return Parameters([self.sample_length, self.beam_height])
 
 
 def reflectivity(
@@ -821,6 +886,9 @@ def reflectivity(
     quad_order=17,
     threads=-1,
     q_offset=0,
+    spin=None,
+    Aguide=270,
+    fkernel=None,
 ):
     r"""
     Abeles/Parratt formalism for calculating reflectivity from a stratified
@@ -834,7 +902,8 @@ def reflectivity(
         Units = Angstrom**-1
     slabs : np.ndarray
         coefficients required for the calculation, has shape (2 + N, 4),
-        where N is the number of layers
+        where N is the number of layers. For magnetic systems the number of
+        columns the shape will be (2 + N, 6).
 
         - slabs[0, 0]
            ignored
@@ -864,6 +933,17 @@ def reflectivity(
         - slabs[-1, 3]
            roughness between backing and layer N
 
+        If the system is magnetic then there are two extra columns:
+
+        - slab[N, 4]
+            Magnetic SLD correction (/1e-6 Angstrom**-2)
+        - slab[N, 5]
+            Angle of magnetic moment in plane (degrees). See
+            https://github.com/reflectivity/analysis/tree/master/validation
+            for details.
+
+        Note that this slab representation is slightly different to that returned by
+        :meth:`refnx.reflect.Structure.slabs()`.
     scale : float
         scale factor. All model values are multiplied by this value before
         the background is added
@@ -885,7 +965,7 @@ def reflectivity(
            (PDF). `dq` will have the shape (qvals.shape, 2, M).  There are
            `M` points in the kernel. `dq[:, 0, :]` holds the q values for the
            kernel, `dq[:, 1, :]` gives the corresponding probability.
-    quad_order: int, optional
+    quad_order : int, optional
         the order of the Gaussian quadrature polynomial for doing the
         resolution smearing. default = 17. Don't choose less than 13. If
         quad_order == 'ultimate' then adaptive quadrature is used. Adaptive
@@ -894,18 +974,25 @@ def reflectivity(
         time. BUT it won't necessarily work across all samples. For
         example, 13 points may be fine for a thin layer, but will be
         atrocious at describing a multilayer with bragg peaks.
-    threads: int, optional
+    threads : int, optional
         Specifies the number of threads for parallel calculation. This
         option is only applicable if you are using the ``_creflect``
         module. The option is ignored if using the pure python calculator,
         ``_reflect``. If `threads == -1` then all available processors are
         used.
-    q_offset: float or refnx.analysis.Parameter, optional
+    q_offset : float or refnx.analysis.Parameter, optional
         Compensates for uncertainties in the angle at which the measurement is
         performed. A positive/negative `q_offset` corresponds to a situation
         where the measured q values (incident angle) may have been under/over
         estimated, and has the effect of shifting the calculated model to
         lower/higher effective q values.
+    spin: refnx.reflect.SpinChannel
+        The polarisation channel that is being calculated. Ignored if
+        `fkernel` is provided.
+    Aguide : float
+        Angle of applied field. Ignored if `fkernel` is provided.
+    fkernel : callable
+        Direct specification of the reflectivity calculation kernel
 
     Example
     -------
@@ -924,9 +1011,22 @@ def reflectivity(
     # cast q_offset to float, if it's a Parameter
     q_offset = float(q_offset)
 
+    if fkernel is not None:
+        # a reflectivity calculation kernel has been specified, use that
+        pass
+    elif slabs.shape[1] == 4:
+        fkernel = kernel
+    elif slabs.shape[1] == 6:
+        fkernel = _gepore_wrapper(spin, Aguide)
+    else:
+        raise ValueError(
+            f"No reflectivity calculation kernel provided, or the slab"
+            f" representation is wrong for the default kernel, {slabs.shape=}"
+        )
+
     # constant dq/q smearing
     if isinstance(dq, numbers.Real) and float(dq) == 0:
-        return kernel(
+        return fkernel(
             q + q_offset, slabs, scale=scale, bkg=bkg, threads=threads
         )
     elif isinstance(dq, numbers.Real):
@@ -934,7 +1034,7 @@ def reflectivity(
         return (
             scale
             * _smeared_kernel_constant(
-                q + q_offset, slabs, dq, threads=threads
+                q + q_offset, slabs, dq, threads=threads, fkernel=fkernel
             )
         ) + bkg
 
@@ -948,7 +1048,11 @@ def reflectivity(
             smeared_rvals = (
                 scale
                 * _smeared_kernel_adaptive(
-                    qvals_flat + q_offset, slabs, dqvals_flat, threads=threads
+                    qvals_flat + q_offset,
+                    slabs,
+                    dqvals_flat,
+                    threads=threads,
+                    fkernel=fkernel,
                 )
                 + bkg
             )
@@ -963,6 +1067,7 @@ def reflectivity(
                     dqvals_flat,
                     quad_order=quad_order,
                     threads=threads,
+                    fkernel=fkernel,
                 )
                 + bkg
             )
@@ -976,7 +1081,7 @@ def reflectivity(
     ):
         qvals_for_res = dq[:, 0, :] + q_offset
         # work out the reflectivity at the kernel evaluation points
-        smeared_rvals = kernel(qvals_for_res, slabs, threads=threads)
+        smeared_rvals = fkernel(qvals_for_res, slabs, threads=threads)
 
         # multiply by probability
         smeared_rvals *= dq[:, 1, :]
@@ -1005,7 +1110,26 @@ def gauss_legendre(n):
     return scipy.special.p_roots(n)
 
 
-def _smear_kernel(x, w, q, dq, threads):
+def _gepore_wrapper(spin, Aguide):
+    _c = {
+        SpinChannel.UP_UP: 0,
+        SpinChannel.UP_DOWN: 1,
+        SpinChannel.DOWN_UP: 2,
+        SpinChannel.DOWN_DOWN: 3,
+    }
+
+    def wrapped_fun(q, w, *args, **kwds):
+        kwds["Aguide"] = Aguide
+        arr = gepore(q, w, *args, **kwds)[_c[spin]]
+        return arr.reshape(q.shape)
+
+    if spin not in _c.keys():
+        raise ValueError("spin must be an enum from refnx.reflect.SpinChannel")
+
+    return wrapped_fun
+
+
+def _smear_kernel(x, w, q, dq, threads, fkernel=kernel):
     """
     Adaptive Gaussian quadrature integration
 
@@ -1030,10 +1154,10 @@ def _smear_kernel(x, w, q, dq, threads):
     prefactor = 1 / np.sqrt(2 * np.pi)
     gauss = prefactor * np.exp(-0.5 * x * x)
     localq = q + x * dq / _FWHM
-    return kernel(localq, w, threads=threads) * gauss
+    return fkernel(localq, w, threads=threads) * gauss
 
 
-def _smeared_kernel_adaptive(qvals, w, dqvals, threads=-1):
+def _smeared_kernel_adaptive(qvals, w, dqvals, threads=-1, fkernel=kernel):
     """
     Resolution smearing that uses adaptive Gaussian quadrature integration
     for the convolution.
@@ -1065,20 +1189,21 @@ def _smeared_kernel_adaptive(qvals, w, dqvals, threads=-1):
     smeared_rvals = np.zeros(qvals.size)
     warnings.simplefilter("ignore", Warning)
     for idx, val in enumerate(qvals):
-        smeared_rvals[idx], err = scipy.integrate.quadrature(
+        smeared_rvals[idx], err = scipy.integrate.quad(
             _smear_kernel,
             -_INTLIMIT,
             _INTLIMIT,
-            tol=2 * np.finfo(np.float64).eps,
-            rtol=2 * np.finfo(np.float64).eps,
-            args=(w, qvals[idx], dqvals[idx], threads),
+            epsabs=0.0,
+            args=(w, qvals[idx], dqvals[idx], threads, fkernel),
         )
 
     warnings.resetwarnings()
     return smeared_rvals
 
 
-def _smeared_kernel_pointwise(qvals, w, dqvals, quad_order=17, threads=-1):
+def _smeared_kernel_pointwise(
+    qvals, w, dqvals, quad_order=17, threads=-1, fkernel=kernel
+):
     """
     Resolution smearing that uses fixed order Gaussian quadrature integration
     for the convolution.
@@ -1131,7 +1256,7 @@ def _smeared_kernel_pointwise(qvals, w, dqvals, quad_order=17, threads=-1):
     vb = vb[..., np.newaxis]
 
     qvals_for_res = (abscissa[np.newaxis, :] * (vb - va) + vb + va) / 2.0
-    smeared_rvals = kernel(qvals_for_res, w, threads=threads)
+    smeared_rvals = fkernel(qvals_for_res, w, threads=threads)
 
     # smeared_rvals = np.reshape(smeared_rvals, (qvals.size, abscissa.size))
 
@@ -1139,7 +1264,7 @@ def _smeared_kernel_pointwise(qvals, w, dqvals, quad_order=17, threads=-1):
     return np.sum(smeared_rvals, -1) * _INTLIMIT
 
 
-def _smeared_kernel_constant(q, w, resolution, threads=-1):
+def _smeared_kernel_constant(q, w, resolution, threads=-1, fkernel=kernel):
     """
     Fast resolution smearing for constant dQ/Q.
 
@@ -1163,7 +1288,7 @@ def _smeared_kernel_constant(q, w, resolution, threads=-1):
     """
 
     if resolution < 0.5:
-        return kernel(q, w, threads=threads)
+        return fkernel(q, w, threads=threads)
 
     resolution /= 100
     gaussnum = 51
@@ -1193,7 +1318,7 @@ def _smeared_kernel_constant(q, w, resolution, threads=-1):
     gauss_x = _cached_linspace(-1.7 * resolution, 1.7 * resolution, gaussnum)
     gauss_y = gauss(gauss_x, resolution / _FWHM)
 
-    rvals = kernel(xlin, w, threads=threads)
+    rvals = fkernel(xlin, w, threads=threads)
     smeared_rvals = np.convolve(rvals, gauss_y, mode="same")
     smeared_rvals *= gauss_x[1] - gauss_x[0]
 

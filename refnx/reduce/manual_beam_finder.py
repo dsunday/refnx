@@ -1,4 +1,6 @@
 from pathlib import Path
+from importlib import resources
+
 from qtpy import QtCore, QtWidgets, uic
 import numpy as np
 
@@ -19,7 +21,7 @@ import refnx.reduce._app as floc
 matplotlib.use("QtAgg")
 
 
-UI_LOCATION = Path(floc.__file__).parent / "ui"
+UI_LOCATION = resources.files(floc) / "ui"
 
 
 class ManualBeamFinder(QtWidgets.QDialog):
@@ -608,7 +610,7 @@ class Cross_Section(FigureCanvas):
             attr, line = found
             dx = x - xpress
             # dy = y - ypress
-            new_loc = int(np.round(loc + dx))
+            new_loc = int(np.round(loc + dx).item())
 
             # TODO make sure lopx and high px cant cross
             # TODO recalc backgrounds and beam centre after plot_button release

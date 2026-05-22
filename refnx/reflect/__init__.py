@@ -11,11 +11,17 @@ from refnx.reflect.reflect_model import (
     available_backends,
     abeles,
     SpinChannel,
+    Footprint,
+)
+from refnx.reflect._polarised_reflect_model import (
+    PolarisedReflectModel,
+    pnr_data_and_generative,
 )
 from refnx.reflect.structure import (
     Structure,
     SLD,
     Slab,
+    MagneticSlab,
     Component,
     sld_profile,
     isld_profile,
@@ -40,7 +46,6 @@ from refnx.reflect._functional_form import FunctionalForm
 from refnx._lib._testutils import PytestTester
 from refnx.reflect._app import gui, main
 
-
 # On OSX, we can get a runtime error due to multiple OpenMP libraries loaded
 # simultaneously. This can happen for instance when calling BLAS inside a
 # prange. Setting the following environment variable allows multiple OpenMP
@@ -64,7 +69,7 @@ except ImportError:
         def __init__(self):
             raise RuntimeError(
                 "To run Motofit you need to install"
-                " IPython, ipywidgets, traitlets,"
+                " IPython, ipywidgets, traitlets, ipympl, "
                 " matplotlib"
             )
 

@@ -36,7 +36,7 @@ try:
 except ImportError:
     from refnx.reflect import _reflect as refcalc
 
-from refnx._lib import flatten
+from refnx._lib import flatten, possibly_open_file
 from refnx.analysis import Parameters, Parameter, possibly_create_parameter
 from refnx.analysis.parameter import BaseParameter
 from refnx.reflect.interface import Interface, Erf, Step
@@ -162,10 +162,6 @@ class Structure(UserList):
         # the structure from that
         self.data = [c for c in components if isinstance(c, Component)]
 
-        # private attribute for future work. Users should not count on this
-        # staying around.
-        self._spin = None
-
     def __copy__(self):
         s = Structure(name=self.name, solvent=self._solvent)
         s.data = self.data.copy()
@@ -284,7 +280,14 @@ class Structure(UserList):
             - slab[N, 3]
                roughness between layer N and N-1
             - slab[N, 4]
-               volume fraction of solvent in layer N.
+               volume fraction of solvent in layer N
+
+            if the system is magnetic then there are two extra columns
+
+            - slab[N, 5]
+                Magnetic SLD correction
+            - slab[N, 6]
+                Angle that magnetic moment makes w.r.t applied field
 
         Notes
         -----
@@ -300,8 +303,8 @@ class Structure(UserList):
             return None
 
         if not (
-            isinstance(self.data[-1], (Slab, MixedSlab))
-            and isinstance(self.data[0], (Slab, MixedSlab))
+            isinstance(self.data[-1], (Slab, MixedSlab, MagneticSlab))
+            and isinstance(self.data[0], (Slab, MixedSlab, MagneticSlab))
         ):
             raise ValueError(
                 "The first and last Components in a Structure"
@@ -320,12 +323,7 @@ class Structure(UserList):
             # if all the interfaces are Gaussian, then simply concatenate
             # the default slabs property of each component.
             sl = [c.slabs(structure=self) for c in self.components]
-
-            try:
-                slabs = np.concatenate(sl)
-            except ValueError:
-                # some of slabs may be None. np can't concatenate arr and None
-                slabs = np.concatenate([s for s in sl if s is not None])
+            slabs = _concatenate_slabs(sl)
         else:
             # there is a non-default interfacial roughness, create a microslab
             # representation
@@ -377,7 +375,12 @@ class Structure(UserList):
         """
         # solvate the slabs from each component
         sl = [c.slabs(structure=self) for c in self.components]
-        total_slabs = np.concatenate(sl)
+        total_slabs = _concatenate_slabs(sl)
+        if self.is_magnetic:
+            raise RuntimeError(
+                "Microslicing not available for magnetic systems yet"
+            )
+
         total_slabs[1:-1] = self.overall_sld(total_slabs[1:-1], self.solvent)
 
         total_slabs[:, 0] = np.fabs(total_slabs[:, 0])
@@ -452,6 +455,13 @@ class Structure(UserList):
         """
         return [c.interfaces for c in self.components]
 
+    @property
+    def is_magnetic(self):
+        """
+        Are any of the Components in the Structure magnetic?
+        """
+        return any([c.is_magnetic for c in self.components])
+
     def overall_sld(self, slabs, solvent):
         """
         Performs a volume fraction weighted average of the material SLD in a
@@ -475,7 +485,7 @@ class Structure(UserList):
 
         return overall_sld(slabs, solv)
 
-    def reflectivity(self, q, threads=0):
+    def reflectivity(self, q, threads=0, spin=None):
         """
         Calculate theoretical reflectivity of this structure
 
@@ -489,6 +499,8 @@ class Structure(UserList):
             module. The option is ignored if using the pure python calculator,
             ``_reflect``. If `threads == 0` then all available processors are
             used.
+        spin : refnx.reflect.SpinChannel
+            Enum specifying which spin-state to calculate. None is unpolarised.
 
         Returns
         -------
@@ -508,7 +520,32 @@ class Structure(UserList):
         `Structure.contract` property can be used.
         """
         abeles = get_reflect_backend()
-        return abeles(q, self.slabs()[..., :4], threads=threads)
+        slabs = self.slabs()
+        if slabs.shape[1] == 5:
+            # unpolarised
+            return abeles(q, slabs[..., :4], threads=threads)
+        elif slabs.shape[1] == 7:
+            # magnetic system
+            _c = {
+                SpinChannel.UP_UP: 0,
+                SpinChannel.UP_DOWN: 1,
+                SpinChannel.DOWN_UP: 2,
+                SpinChannel.DOWN_DOWN: 3,
+            }
+            if spin is None:
+                # TODO: implement unpolarised reflectivity calc for
+                # magnetic system
+                raise ValueError(
+                    "Unpolarised reflectivity calculation not yet"
+                    " possible for magnetic system."
+                )
+            slabs = np.take_along_axis(
+                slabs, np.array([0, 1, 2, 3, 5, 6])[None, :], axis=1
+            )
+            from refnx.reflect import _creflect
+
+            ref = _creflect.gepore(q, slabs)
+            return ref[_c[spin]]
 
     def sld_profile(self, z=None, align=0, max_delta_z=None):
         """
@@ -541,8 +578,8 @@ class Structure(UserList):
         if (
             (slabs is None)
             or (len(slabs) < 2)
-            or (not isinstance(self.data[0], Slab))
-            or (not isinstance(self.data[-1], Slab))
+            or (not isinstance(self.data[0], (Slab, MagneticSlab)))
+            or (not isinstance(self.data[-1], (Slab, MagneticSlab)))
         ):
             raise ValueError(
                 "Structure requires fronting and backing"
@@ -772,6 +809,7 @@ class Structure(UserList):
         model : :class:`orso.fileio.model_language.SampleModel`
         """
         from orsopy.fileio import model_language as ml
+        from orsopy.fileio import ComplexValue
 
         defaults = ml.ModelParameters(
             length_unit="angstrom", sld_unit="1/angstrom^2"
@@ -790,7 +828,7 @@ class Structure(UserList):
                 )
             else:
                 _csld = complex(comp.sld) * 1e-6
-                _csld = ml.ComplexValue(_csld.real, _csld.imag)
+                _csld = ComplexValue(_csld.real, _csld.imag)
                 mat = ml.Material(sld=_csld)
 
             if comp.name:
@@ -818,7 +856,7 @@ class Structure(UserList):
 
         Parameters
         ----------
-        sample_model : :class:`orso.fileio.model_language.SampleModel`
+        sample_model : {:class:`orso.fileio.model_language.SampleModel`, str, file-like}
 
         Returns
         -------
@@ -832,18 +870,56 @@ class Structure(UserList):
         >>> model = SampleModel(**dct)
 
         """
+        from orsopy.fileio import model_language
+        from orsopy.slddb.material import Material as _Material
+        from orsopy.slddb.material import get_element
+        from orsopy.utils.chemical_formula import Formula as _Formula
+
+        import yaml
+
+        if isinstance(sample_model, model_language.SampleModel):
+            pass
+        else:
+            with possibly_open_file(sample_model) as f:
+                dtxt = yaml.safe_load(f)
+                if "data_source" in dtxt:
+                    dtxt = dtxt["data_source"]
+                if "sample" in dtxt:
+                    dtxt = dtxt["sample"]["model"]
+                sample_model = model_language.SampleModel(**dtxt)
+
         layers = sample_model.resolve_to_layers()
+
         s = Structure()
 
         for layer in layers:
             mat = layer.material
             if mat.formula is not None:
-                sld = MaterialSLD(
-                    mat.formula, density=mat.mass_density.magnitude
-                )
+                # force number density calculation
+                mat.generate_density()
+                if mat.mass_density is not None:
+                    sld = MaterialSLD(
+                        mat.formula,
+                        density=mat.mass_density.magnitude,
+                        name=layer.original_name,
+                    )
+                elif mat.number_density is not None:
+                    formula = _Formula(mat.formula, strict=True)
+                    material = _Material(
+                        [
+                            (get_element(element), amount)
+                            for element, amount in formula
+                        ],
+                        fu_dens=mat.number_density.as_unit("1/angstrom^3"),
+                    )
+                    density = material.dens
+                    sld = MaterialSLD(
+                        mat.formula, density=density, name=layer.original_name
+                    )
+                else:
+                    sld = SLD(mat.get_sld() * 1e6)
             else:
-                sld = SLD(mat.get_sld() * 1e6)
-                print(sld)
+                sld = SLD(mat.get_sld() * 1e6, name=layer.original_name)
 
             slab = Slab(
                 layer.thickness.magnitude,
@@ -872,10 +948,52 @@ def overall_sld(slabs, solvent):
     averaged_slabs : np.ndarray
         the averaged slabs.
     """
+    slabs = np.copy(slabs)
     slabs[..., 1:3] *= (1 - slabs[..., 4])[..., np.newaxis]
     slabs[..., 1] += solvent.real * slabs[..., 4]
     slabs[..., 2] += solvent.imag * slabs[..., 4]
     return slabs
+
+
+def _concatenate_slabs(sl):
+    """
+    Concatenates the slab representation. Entries that have 5 columns are
+    non-magnetic, entries with 7 columns are magnetic and need a wider
+    representation.
+
+    Parameters
+    ----------
+    sl: sequence
+        An iterable containing the slab representation of each Component.
+    """
+    try:
+        # they may all be the same size, in which case don't waste time
+        v = np.concatenate(sl)
+        return v
+    except ValueError:
+        # at this point there may be some magnetic slabs, or some entries may
+        # be None.
+        pass
+
+    cols = [s.shape[1] if s is not None else s for s in sl]
+    is_magnetic = 7 in cols
+    if is_magnetic:
+        # work out total size of slab array
+        rows = np.sum([s.shape[0] for s in sl if s is not None])
+        slabs = np.zeros((rows, 7))
+        # automatically align magnetic moment with applied field, assuming
+        # applied field is in the plane of the sample
+        slabs[:, -1] = 90.0
+        idx = 0
+        for s in sl:
+            if s is None:
+                continue
+            shp = s.shape
+            slabs[idx : idx + shp[0], : shp[1]] = s
+            idx += shp[0]
+        return slabs
+    else:
+        return np.concatenate([s for s in sl if s is not None])
 
 
 class Scatterer:
@@ -1171,6 +1289,10 @@ class Component:
     def __init__(self, name=""):
         self.name = name
         self._interfaces = None
+
+    @property
+    def is_magnetic(self):
+        return False
 
     def __or__(self, other):
         """
@@ -1660,10 +1782,9 @@ class Stack(Component, UserList):
             self.solvent = structure.solvent
 
         repeats = int(round(abs(self.repeats.value)))
+        sl = [c.slabs(structure=self) for c in self.components]
 
-        slabs = np.concatenate(
-            [c.slabs(structure=self) for c in self.components]
-        )
+        slabs = _concatenate_slabs(sl)
 
         if repeats > 1:
             slabs = np.concatenate([slabs] * repeats)
@@ -1731,8 +1852,12 @@ class Stack(Component, UserList):
             raise ValueError()
         return self
 
+    @property
+    def is_magnetic(self):
+        return any([c.is_magnetic for c in self])
 
-class _PolarisedSlab(Component):
+
+class MagneticSlab(Component):
     """
     A slab component has uniform SLD over its thickness.
 
@@ -1747,15 +1872,27 @@ class _PolarisedSlab(Component):
     rhoM : refnx.analysis.Parameter or float
         magnetic SLD of film (/1e-6 Angstrom**-2)
     thetaM : refnx.analysis.Parameter or float
-        Magnetic angle of the layer
+        Magnetic angle of the layer (degrees). See
+        https://github.com/reflectivity/analysis/tree/master/validation
+        for geometry details.
+        For a magnetic moment to be parallel or anti-parallel to an applied
+        field in the plane of the sample (`Aguide=270` or `90`), `thetaM`
+        should be 90 or -90 deg respectively. If `thetaM = 0` then the moment
+        in the film is perpendicular to the applied field and spin flip will
+        be maximised.
     name : str
         Name of this slab
-    vfsolv : refnx.analysis.Parameter or float
-        Volume fraction of solvent [0, 1]
     interface : {:class:`Interface`, None}, optional
         The type of interfacial roughness associated with the Slab.
         If `None`, then the default interfacial roughness is an Error
         function (also known as Gaussian roughness).
+
+    Notes
+    -----
+    For the applied field to be in the plane of the sample (perpendicular to
+    the beam propagation direction) `Aguide` should be 270 or 90 degrees.
+    For the magnetic moment to be parallel or anti-parallel to the applied
+    field `thetaM` should be 90 or -90 respectively.
     """
 
     def __init__(
@@ -1764,9 +1901,8 @@ class _PolarisedSlab(Component):
         sld,
         rough,
         rhoM,
-        thetaM,
+        thetaM=90.0,
         name="",
-        vfsolv=0,
         interface=None,
     ):
         super().__init__(name=name)
@@ -1779,9 +1915,6 @@ class _PolarisedSlab(Component):
             self.sld = SLD(sld)
         self.rough = possibly_create_parameter(
             rough, name=f"{name} - rough", units="Å"
-        )
-        self.vfsolv = possibly_create_parameter(
-            vfsolv, name=f"{name} - volfrac solvent", bounds=(0.0, 1.0)
         )
         self.rhoM = possibly_create_parameter(
             rhoM,
@@ -1796,11 +1929,14 @@ class _PolarisedSlab(Component):
 
     def __repr__(self):
         return (
-            f"Slab({self.thick!r}, {self.sld!r}, {self.rough!r},"
-            f" name={self.name!r}, vfsolv={self.vfsolv!r},"
-            f" rhoM={self.rhoM!r}, thetaM={self.thetaM!r}"
-            f" interface={self.interfaces!r})"
+            f"MagneticSlab({self.thick!r}, {self.sld!r}, {self.rough!r},"
+            f" name={self.name!r}, rhoM={self.rhoM!r},"
+            f" thetaM={self.thetaM!r}, interface={self.interfaces!r})"
         )
+
+    @property
+    def is_magnetic(self):
+        return True
 
     def __str__(self):
         return str(self.parameters)
@@ -1816,7 +1952,6 @@ class _PolarisedSlab(Component):
             self.thick,
             self.sld.parameters,
             self.rough,
-            self.vfsolv,
             self.rhoM,
             self.thetaM,
         ]
@@ -1832,26 +1967,16 @@ class _PolarisedSlab(Component):
         else:
             sldc = complex(self.sld)
 
-        mag_proj = self.rhoM.value * np.cos(np.degrees(self.thetaM.value))
-
-        if structure._spin in [SpinChannel.UP_UP, SpinChannel.UP_DOWN]:
-            _op = op.add
-        elif structure._spin in [SpinChannel.DOWN_UP, SpinChannel.DOWN_DOWN]:
-            _op = op.sub
-        else:
-            raise ValueError(
-                "Invalid spin state. Set Structure._spin to one of the"
-                " refnx.reflect.SpinChannel enumerations."
-            )
-
         return np.array(
             [
                 [
                     self.thick.value,
-                    _op(sldc.real, mag_proj),
+                    sldc.real,
                     sldc.imag,
                     self.rough.value,
-                    self.vfsolv.value,
+                    0.0,
+                    self.rhoM.value,
+                    self.thetaM.value,
                 ]
             ],
             dtype=float,
@@ -1930,14 +2055,14 @@ def _profile_slicer(z, sld_profile, slice_size=None):
 
 def sld_profile(slabs, z=None, max_delta_z=None):
     """
-    Calculates an SLD profile, as a function of distance through the
+    Calculates a nuclear SLD profile, as a function of distance through the
     interface.
 
     Parameters
     ----------
     slabs : :class:`np.ndarray`
         Slab representation of this structure.
-        Has shape (N, 5).
+        Has shape (N, 5) or (N, 7) for magnetic systems.
 
         - slab[N, 0]
            thickness of layer N
@@ -2106,8 +2231,11 @@ def isld_profile(slabs, z=None, max_delta_z=None):
 
     return zed, isld
 
-    
-def create_occupancy(structure, solvent_slab=-1):
+
+
+
+
+def create_occupancy(structure, solvent_slab=-1, z=None):
     """
     Creates a volume fraction (occupancy) profile for a given Structure.
 
@@ -2122,6 +2250,12 @@ def create_occupancy(structure, solvent_slab=-1):
         If None, then solvation is done by neither fronting or backing,
         but by another material. This might be a solvent vapour in an
         air-solid measurement.
+
+    z: {None, `np.ndarray`}, optional
+        If `z is None` then the SLD profile will have 500 points (unless
+        `max_delta_z` is specified).
+        If `z` is an array, then the array specifies the interfacial locations
+        at which the SLD will be evaluated.
 
     Returns
     -------
@@ -2165,24 +2299,24 @@ def create_occupancy(structure, solvent_slab=-1):
     else:
         nvfp = len(_slabs)
 
-    z, sldp = sld_profile(_slabs)
-    vfp = np.zeros((nvfp, len(z)), float)
+    _z, sldp = sld_profile(_slabs, z=z)
+    vfp = np.zeros((nvfp, len(_z)), float)
 
     for i in range(len(_slabs)):
         _slabs[:, 1:3] = 0
         _slabs[i, 1] = vf[i]
-        _vfp = sld_profile(_slabs, z=z)[1]
+        _vfp = sld_profile(_slabs, z=_z)[1]
         vfp[i] = _vfp
 
     # fix up the solvent vfp
     _slabs[:, 1] = 1 - vf
 
     if solvent_slab is None:
-        _vfp = sld_profile(_slabs, z=z)[1]
+        _vfp = sld_profile(_slabs, z=_z)[1]
         vfp[-1] = _vfp
     else:
         _slabs[solvent_slab, 1] = 1
-        _vfp = sld_profile(_slabs, z=z)[1]
+        _vfp = sld_profile(_slabs, z=_z)[1]
         vfp[solvent_slab] = _vfp
 
-    return z, vfp
+    return _z, vfp

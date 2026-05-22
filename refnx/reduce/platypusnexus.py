@@ -8,7 +8,6 @@ from time import gmtime, strftime
 import string
 import warnings
 from contextlib import contextmanager
-from enum import Enum
 
 from scipy.optimize import leastsq, curve_fit
 from scipy.stats import t
@@ -33,7 +32,6 @@ from refnx.reduce.event import (
 from refnx.reduce.rebin import rebin, rebin_along_axis
 from refnx._lib import possibly_open_file
 from refnx.reflect import SpinChannel
-
 
 EXTENT_MULT = 2
 PIXEL_OFFSET = 4
@@ -81,8 +79,8 @@ def catalogue(start, stop, data_folder=None, prefix="PLP", keys=None):
     -----
     The default set of keys is:
     ["filename", "end_time", "sample_name", "ss1vg", "ss2vg", "ss3vg",
-      "ss4vg", "omega", "twotheta", "total_counts", "bm1_counts", "time",
-      "daq_dirname", "start_time"]
+    "ss4vg", "omega", "twotheta", "total_counts", "bm1_counts", "time",
+    "daq_dirname", "start_time"]
     """
     info = ["filename", "end_time", "sample_name"]
 
@@ -667,57 +665,51 @@ class PolarisedCatalogue(PlatypusCatalogue):
             self.is_magnet = False
 
 
-class SpinSet(object):
+class SpinSet:
     """
     Describes a set of spin-channels at a given angle of incidence,
     and can process beams with individual reduction options.
 
     Parameters
     ----------
-    down_down   :   str or refnx.reduce.PlatypusNexus
+    down_down :   str or refnx.reduce.PlatypusNexus
         Input filename or PlatypusNexus object for the R-- spin
         channel.
-    up_up       :   str or refnx.reduce.PlatypusNexus
+    up_up :   str or refnx.reduce.PlatypusNexus
         Input filename or PlatypusNexus object for the R++ spin
         channel.
-    down_up     :   str or refnx.reduce.PlatypusNexus, optional
+    down_up :   str or refnx.reduce.PlatypusNexus, optional
         Input filename or PlatypusNexus object for the R-+ spin
         channel.
-    up_down     :   str or refnx.reduce.PlatypusNexus, optional
+    up_down :   str or refnx.reduce.PlatypusNexus, optional
         Input filename or PlatypusNexus object for the R+- spin
         channel.
 
     Attributes
     ----------
-    channels    :   dict
-        Dictionary of each measured spin channel
-            "dd"    :   refnx.reduce.PlatypusNexus (R--)
-            "du"    :   refnx.reduce.PlatypusNexus or None (R-+)
-            "ud"    :   refnx.reduce.PlatypusNexus or None (R+-)
-            "uu"    :   refnx.reduce.PlatypusNexus (R++)
-    sc_opts     :   dict of refnx.reduce.ReductionOptions
+    channels :   dict
+        Dictionary of each measured spin channel:
+
+        - "dd" : :class:`refnx.reduce.PlatypusNexus` (R--)
+        - "du" : :class:`refnx.reduce.PlatypusNexus` or None (R-+)
+        - "ud" : :class:`refnx.reduce.PlatypusNexus` or None (R+-)
+        - "uu" : :class:`refnx.reduce.PlatypusNexus` (R++)
+
+    sc_opts :   dict of refnx.reduce.ReductionOptions
         Reduction options for each spin channel ("dd", "du", "ud", "uu)
-    dd          :   refnx.reduce.PlatypusNexus
-        R-- spin channel
-    uu          :   refnx.reduce.PlatypusNexus
-        R++ spin channel
-    du          :   refnx.reduce.PlatypusNexus or None
-        R-+ spin channel
-    ud          :   refnx.reduce.PlatypusNexus or None
-        R+- spin channel
 
     Notes
     -----
-    Each of the `ReductionOptions` specified in `dd_opts,` etc, is used
+    Each of the :class:`ReductionOptions` specified in `sc_opts` is used
     to specify the options used to reduce each spin channel. The following
-    reduction options must be consistent and identical across all
+    items in the reduction options must be consistent and identical across all
     spin channels so as to maintain the same wavelength axis across
     the datasets:
 
-    lo_wavelength    : key in refnx.reduce.ReductionOptions
-    hi_wavelength    : key in refnx.reduce.ReductionOptions
-    rebin_percent    : key in refnx.reduce.ReductionOptions
-    wavelength_bins  : key in refnx.reduce.ReductionOptions
+    - lo_wavelength : key in refnx.reduce.ReductionOptions
+    - hi_wavelength : key in refnx.reduce.ReductionOptions
+    - rebin_percent : key in refnx.reduce.ReductionOptions
+    - wavelength_bins : key in refnx.reduce.ReductionOptions
     """
 
     def __init__(self, down_down, up_up, down_up=None, up_down=None):
@@ -776,36 +768,51 @@ class SpinSet(object):
                 self.channels[sc] = channel
                 self.sc_opts[sc] = reduction_options.copy()
             else:
-                RuntimeError(
-                    f"Supplied spin channel {_spin_channels[sc]} does not match flipper status"
+                warnings.warn(
+                    f"Supplied spin channel {_spin_channels[sc]}"
+                    f" does not match flipper status",
+                    RuntimeWarning,
                 )
 
     @property
     def dd(self):
+        """
+        :class:`refnx.reduce.PlatypusNexus` R-- spin channel
+        """
         return self.channels["dd"]
 
     @property
     def du(self):
+        """
+        :class:`refnx.reduce.PlatypusNexus` R-+ spin channel
+        """
         return self.channels["du"]
 
     @property
     def ud(self):
+        """
+        :class:`refnx.reduce.PlatypusNexus` R+- spin channel
+        """
         return self.channels["ud"]
 
     @property
     def uu(self):
+        """
+        :class:`refnx.reduce.PlatypusNexus` R++ spin channel
+        """
         return self.channels["uu"]
 
     @property
     def spin_channels(self):
         """
-        Gives a quick indication of what spin channels were measured and
-        are present in this SpinSet.
+        Gives a quick indication of what spin channels are present in this
+        `SpinSet`.
 
         Returns
         -------
-        list of refnx.reduce.SpinChannel Enum values or None, depending on
-        if the spin channel was measured.
+        channels : list
+            :class:`refnx.reflect.SpinChannel` Enum values or None, depending
+            on if the spin channel was measured.
         """
         return [
             (
@@ -818,9 +825,9 @@ class SpinSet(object):
 
     def process(self, **reduction_options):
         """
-        Process beams in SpinSet.
+        Process beams in `SpinSet`.
 
-        If reduction_options is None, the reduction options for each spin
+        If `reduction_options` is None, the reduction options for each spin
         channel are specified by the dictionary of spin channel reduction
         options `SpinSet.sc_opts` which are initialised to the
         standard options when constructing the object.
@@ -829,9 +836,8 @@ class SpinSet(object):
         you need to ensure that the wavelength bins between each spin channel
         remain identical, otherwise a ValueError will be raised.
 
-        If `reduction_options`
-        is not None, then SpinSet.process() will use these options for all
-        spin channels.
+        If `reduction_options` is not None, then `SpinSet.process()` will use
+        these options for all spin channels.
 
         Parameters
         ----------
@@ -877,9 +883,9 @@ class SpinSet(object):
 
     def plot_spectra(self, **kwargs):
         """
-        Plots the processed spectrums for each spin state in the SpinSet
+        Plots the processed spectra for each spin state in the SpinSet.
 
-        Requires matplotlib to be installed
+        Requires matplotlib be installed.
         """
         import matplotlib.pyplot as plt
 
@@ -1477,14 +1483,14 @@ class ReflectNexus:
             deviation.
 
             - -1
-                use `manual_beam_find`.
+               use `manual_beam_find`.
             - None
-                use the automatic beam finder, falling back to
-               `manual_beam_find` if it's provided.
+               use the automatic beam finder, falling back to `manual_beam_find`
+               if it's provided.
             - (float, float)
-                specify the peak and peak standard deviation. The peak standard
-                deviation is used to calculate the width of the foreground
-                region, unless `lopx_hipx` is specified.
+               specify the peak and peak standard deviation.
+               The peak standard deviation is used to calculate the width of
+               the foreground region, unless `lopx_hipx` is specified.
 
         peak_pos_tol : (float, float) or None
             Convergence tolerance for the beam position and width to be
@@ -1554,8 +1560,7 @@ class ReflectNexus:
         - path - path to the data file
         - datafilename - name of the datafile
         - datafile_number - datafile number.
-        - m_topandtail - the corrected 2D detector image,
-                         (n_spectra, TOF, {X, Y})
+        - m_topandtail - the corrected 2D detector image, (n_spectra, TOF, {X, Y})
         - m_topandtail_sd - corresponding standard deviations
         - n_spectra - number of spectra in processed data
         - bm1_counts - beam montor counts, (n_spectra,)
@@ -1564,8 +1569,7 @@ class ReflectNexus:
         - m_beampos - beam_centre for each spectrum, (n_spectra, )
         - m_lambda - wavelengths for each spectrum, (n_spectra, TOF)
         - m_lambda_fwhm - corresponding FWHM of wavelength distribution
-        - m_lambda_hist - wavelength bins for each spectrum,
-                          (n_spectra, TOF + 1)
+        - m_lambda_hist - wavelength bins for each spectrum, (n_spectra, TOF + 1)
         - m_spec_tof - TOF for each wavelength bin, (n_spectra, TOF)
         - mode - the experimental mode, e.g. FOC/MT/POL/POLANAL/SB/DB
         - detector_z - detector height or angle, (n_spectra, )
@@ -1842,7 +1846,7 @@ class ReflectNexus:
         hipx = hipx.astype(int)
 
         if lopx_hipx is not None:
-            print(lopx_hipx)
+            # print(lopx_hipx)
             lopx = np.ones(n_spectra, dtype=int) * int(lopx_hipx[0])
             hipx = np.ones(n_spectra, dtype=int) * int(lopx_hipx[1])
             for i in range(n_spectra):
@@ -1994,22 +1998,39 @@ class ReflectNexus:
         # assert np.isfinite(detector).all()
         # assert np.isfinite(detectorSD).all()
 
-        # normalise by beam monitor 1.
+        # normalise by beam monitor, falling back to time
         if normalise:
-            m_spec, m_spec_sd = EP.EPdiv(
-                m_spec,
-                m_spec_sd,
-                bm1_counts[:, np.newaxis],
-                bm1_counts_sd[:, np.newaxis],
-            )
+            if np.count_nonzero(bm1_counts):
+                # we have a beam monitor that provides counts
+                m_spec, m_spec_sd = EP.EPdiv(
+                    m_spec,
+                    m_spec_sd,
+                    bm1_counts[:, np.newaxis],
+                    bm1_counts_sd[:, np.newaxis],
+                )
 
-            output = EP.EPdiv(
-                detector,
-                detector_sd,
-                bm1_counts[:, np.newaxis, np.newaxis],
-                bm1_counts_sd[:, np.newaxis, np.newaxis],
-            )
-            detector, detector_sd = output
+                output = EP.EPdiv(
+                    detector,
+                    detector_sd,
+                    bm1_counts[:, np.newaxis, np.newaxis],
+                    bm1_counts_sd[:, np.newaxis, np.newaxis],
+                )
+                detector, detector_sd = output
+            else:
+                warnings.warn(
+                    "Normalising by time, no beam monitor counts.",
+                    RuntimeWarning,
+                )
+                m_spec, m_spec_sd = EP.EPmulk(
+                    m_spec, m_spec_sd, 1 / cat.time[:, np.newaxis]
+                )
+
+                output = EP.EPmulk(
+                    detector,
+                    detector_sd,
+                    1 / cat.time[:, np.newaxis, np.newaxis],
+                )
+                detector, detector_sd = output
 
         """
         now work out dlambda/lambda, the resolution contribution from

@@ -260,7 +260,7 @@ class Objective(BaseObjective):
         `logp_extra(model, data)`. The `model` will already possess
         updated parameters. Beware of including the same log-probability
         terms more than once.
-    auxiliary_params : {sequence, Parameters}, optional
+    auxiliary_params : {sequence, refnx.analysis.Parameters}, optional
         Extra Parameter objects that are involved with curvefitting, but
         aren't directly included as part of the `model`. See notes for more
         details.
@@ -295,6 +295,10 @@ class Objective(BaseObjective):
         self.model = model
         # should be a Data1D instance
         if isinstance(data, Data1D):
+            self.data = data
+        elif all([hasattr(data, a) for a in ["data", "y", "__len__"]]):
+            # it may be an object that is composed to look like a Data1D
+            # object, let it through.
             self.data = data
         else:
             self.data = Data1D(data=data)
@@ -928,7 +932,7 @@ class Objective(BaseObjective):
             plot on the graph.
         parameter: refnx.analysis.Parameter
             Creates an interactive plot for the Parameter in Jupyter. Requires
-            ipywidgets be installed. Use with %matplotlib notebook/qt.
+            ipywidgets be installed. Use with %matplotlib ipympl/qt.
         fig: Figure instance, optional
             If `fig` is not supplied then a new figure is created. Otherwise
             the graph is created on the current axes on the supplied figure.

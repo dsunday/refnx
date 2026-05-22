@@ -10,6 +10,16 @@ import numpy as np
 import pandas as pd
 import h5py
 
+from orsopy.fileio import (
+    Orso,
+    OrsoDataset,
+    ValueRange,
+    InstrumentSettings,
+    Column,
+    ErrorColumn,
+    File,
+)
+
 from refnx.reduce.platypusnexus import (
     PlatypusNexus,
     ReflectNexus,
@@ -31,7 +41,6 @@ from refnx.reduce.parabolic_motion import (
 from refnx.dataset import ReflectDataset, Data1D
 from refnx.dataset.data1d import _data1D_to_hdf
 from refnx._lib import possibly_open_file
-
 
 _template_ref_xml = """<?xml version="1.0"?>
 <REFroot xmlns="">
@@ -633,7 +642,7 @@ class PlatypusReduce(ReflectReduce):
 
 
 class PolarisationEfficiency:
-    """
+    r"""
     Describes the polarisation efficiency of a neutron scattering system
     with the option of having a polariser, flipper-1, flipper-2, and
     analyser in the system.
@@ -646,14 +655,13 @@ class PolarisationEfficiency:
     Parameters
     ----------
     wavelength_axis :   numpy.array (T,)
-                    Array of wavelength bin centres to initialise the length
-                    of the (T, 4, 4) efficiency matrices.
-
-    config          :   {"full", "PF"}
-                    Indication of polariser/analyser configuration. If
-                    "full" is used, all polarising and flipping elements are
-                    taken into account. If "PF" is used, only the polariser
-                    and flipper are taken into account.
+        Array of wavelength bin centres to initialise the length
+        of the (T, 4, 4) efficiency matrices.
+    config :   {"full", "PF"}
+        Indication of polariser/analyser configuration. If
+        "full" is used, all polarising and flipping elements are
+        taken into account. If "PF" is used, only the polariser
+        and flipper are taken into account.
     """
 
     def __init__(self, wavelength_axis, config="full"):
@@ -681,7 +689,7 @@ class PolarisationEfficiency:
         """
         Define PLATYPUS polarisation efficiency matrices as described in
         the invited article in Rev. Sci. Instr. 83, 081301 (2012)
-        `Polarization "Down Under": The polarized time-of-flight neutron
+        'Polarization "Down Under": The polarized time-of-flight neutron
         reflectometer PLATYPUS' (https://doi.org/10.1063/1.4738579).
 
         In this formulation, the relationship between raw spectra
@@ -698,7 +706,7 @@ class PolarisationEfficiency:
 
         Parameters
         ----------
-        config      :   {"full", "PF"}
+        config :   {"full", "PF"}
         """
         # Define polariser efficiency as function of wavelength.
         p1a = 0.993
@@ -824,11 +832,12 @@ class PolarisedReduce:
     spin_set_direct :   refnx.reduce.SpinSet
         Direct beams from PNR experiment
     reducers        :   dict
-            Dictionary of each measured spin channel
-                "dd"    :   refnx.reduce.PlatypusNexus (R--)
-                "du"    :   refnx.reduce.PlatypusNexus or None (R-+)
-                "ud"    :   refnx.reduce.PlatypusNexus or None (R+-)
-                "uu"    :   refnx.reduce.PlatypusNexus (R++)
+        Dictionary of each measured spin channel
+
+        - "dd" :   :class:`refnx.reduce.PlatypusNexus` (R--)
+        - "du" :   :class:`refnx.reduce.PlatypusNexus` or None (R-+)
+        - "ud" :   :class:`refnx.reduce.PlatypusNexus` or None (R+-)
+        - "uu" :   :class:`refnx.reduce.PlatypusNexus` (R++)
 
     Examples
     --------
@@ -1264,7 +1273,7 @@ def reduce_stitch(
     scale : float, optional
         Scales the data by this value.
     reduction_options : None, dict, or list of dict, optional
-        Options passed directly to `refnx.reduce.PlatypusNexus.process`,
+        Options passed directly to :meth:`refnx.reduce.ReflectNexus.process`,
         for processing of individual spectra. Look at that method docstring
         for specification of options. If an individual dict then the same
         options are used to process all datasets. A list (or sequence) of
@@ -1323,6 +1332,20 @@ def reduce_stitch(
     else:
         raise ValueError("Incorrect prefix specified")
 
+    # bare bones of Orso file
+    header = Orso.empty()
+    header.columns.extend(
+        [
+            ErrorColumn(
+                error_of="R", error_type="uncertainty", value_is="sigma"
+            ),
+            ErrorColumn(
+                error_of="Qz", error_type="resolution", value_is="sigma"
+            ),
+        ]
+    )
+    angles = []
+
     for index, val in enumerate(zipped):
         reflect_datafile = data_folder / number_datafile(val[0], prefix=prefix)
         direct_datafile = data_folder / number_datafile(val[1], prefix=prefix)
@@ -1339,6 +1362,28 @@ def reduce_stitch(
             datasets[0].data, requires_splice=True, trim_trailing=trim_trailing
         )
 
+        # expand the Orso header
+        header.reduction.software.name = "refnx"
+        angles.append(reducer.reflected_beam.cat.omega[0])
+        header.data_source.measurement.data_files.append(
+            File(number_datafile(val[0], prefix=prefix))
+        )
+        if not index:
+            header.data_source.sample = reducer.reflected_beam.cat.sample_name[
+                0
+            ].decode()
+
+    # ORSO file completion
+    _data = np.array(combined_dataset.data)
+    _data[-1] /= 2.3548
+    vr = ValueRange(
+        min=min(angles), max=max(angles), individual_magnitudes=angles
+    )
+    header.data_source.measurement.instrument_settings.incident_angle = vr
+    header.data_source.experiment.instrument = prefix
+
+    orso_dataset = OrsoDataset(info=header, data=_data.T)
+
     fname_dat = None
 
     if save:
@@ -1351,6 +1396,11 @@ def reduce_stitch(
         fname_dat = f"c_{fname}.dat"
         with open(fname_dat, "wb") as f:
             combined_dataset.save(f)
+
+        # save OrsoDataset
+        # call it Z so that they appear at one end of a file explorer
+        fname_orso = f"z_{fname}.ort"
+        orso_dataset.save(fname_orso)
 
         # fname_xml = "c_{0}.xml".format(fname)
         # with open(fname_xml, "wb") as f:

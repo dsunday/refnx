@@ -8,8 +8,9 @@ Installation
 .. _miniforge: https://github.com/conda-forge/miniforge
 .. _github: https://github.com/refnx/refnx
 .. _homebrew: https://brew.sh/
+.. _PyPI: https://pypi.org/project/refnx/
 
-*refnx* has been tested on Python 3.9, 3.10, 3.11, 3.12. It requires the
+*refnx* has been tested on Python 3.11, 3.12, 3.13, 3.14. It requires the
 *numpy, scipy, cython* packages to work. Additional features
 require the *pytest, h5py, xlrd, uncertainties, attrs, matplotlib, Jupyter,*
 *ipywidgets, traitlets, tqdm, pandas, qtpy, pyqt6, periodictable, pymc,
@@ -53,19 +54,19 @@ Creating a conda environment
 
     ::
 
-     python -m pip install refnx[all]
+     python -m pip install "refnx[all]"     # the quotes are required if you're using zsh
 
 Installing with pip
 ===================
 
-There are refnx wheels available for macOS/Windows/Linux on PyPI. Using the
+There are refnx wheels available for macOS/Windows/Linux on `PyPI`_. Using the
 [all] modifier means that all refnx's optional dependencies will also be
 installed.
 
     ::
 
      # install refnx and all optional dependencies
-     python -m pip install refnx[all]
+     python -m pip install "refnx[all]"     # the quotes are required if you're using zsh
 
      # alternatively just install refnx itself
      python -m pip install refnx
@@ -114,7 +115,8 @@ package from within the refnx git repository.
 
     ::
 
-     pip install .
+     python -m pip install build cython numpy meson-python ninja
+     python -m build
 
 3. Run the tests, they should all work.
 

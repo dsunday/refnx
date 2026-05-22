@@ -1,6 +1,7 @@
 from pathlib import Path
 from copy import deepcopy
 import pickle
+from importlib import resources
 import os
 import sys
 import time
@@ -65,13 +66,13 @@ from refnx.reflect import (
     Structure,
     MixedReflectModel,
 )
-from refnx.dataset import Data1D
+import refnx.reflect._app
+from refnx.dataset import Data1D, OrsoDataset
 from refnx.reflect._code_fragment import code_fragment
 from refnx._lib import unique, flatten, MapWrapper
 
-
 # matplotlib.use('QtAgg')
-UI_LOCATION = Path(__file__).absolute().parent / "ui"
+UI_LOCATION = resources.files(refnx.reflect._app) / "ui"
 
 
 class MotofitMainWindow(QtWidgets.QMainWindow):
@@ -523,41 +524,61 @@ class MotofitMainWindow(QtWidgets.QMainWindow):
                 except Exception:
                     continue
 
-        loaded_data_objects = [
-            data_object.name for data_object in data_objects
-        ]
-        new_names = [
-            n for n in loaded_data_objects if n not in existing_data_objects
-        ]
+        loaded_names = [data_object.name for data_object in data_objects]
+        new_objects = {
+            nm: obj
+            for nm, obj in zip(loaded_names, data_objects)
+            if nm not in existing_data_objects
+        }
 
         # give a newly loaded data object a simple model. You don't want to do
         # this for an object that's already been loaded.
-        for name in new_names:
-            fronting = SLD(0, name="fronting")
-            sio2 = SLD(3.47, name="1")
-            backing = SLD(2.07, name="backing")
-            s = fronting() | sio2(15, 3) | backing(0, 3)
-            data_object_node = self.treeModel.data_object_node(name)
-            model = ReflectModel(s)
+        for name, data_object in new_objects.items():
+            ds = data_object.dataset
+            have_model = False
+            if (
+                isinstance(ds, OrsoDataset)
+                and ds.orso[0].info.data_source.sample.model is not None
+            ):
+                try:
+                    s, model, objective = ds.setup_analysis()
+                    for component in s:
+                        # we can only deal with Slabs at the moment
+                        assert isinstance(component, Slab)
+                    #     if not isinstance(component.sld, SLD):
+                    #         # cast Scatterer to SLD, GUI only deals with SLD
+                    #         _sld = SLD(complex(component.sld))
+                    #         component.sld = _sld
+
+                    have_model = True
+                except Exception:
+                    have_model = False
+
+            if not have_model:
+                fronting = SLD(0, name="fronting")
+                sio2 = SLD(3.47, name="1")
+                backing = SLD(2.07, name="backing")
+                s = fronting() | sio2(15, 3) | backing(0, 3)
+                model = ReflectModel(s)
+
             model.name = name
+            data_object_node = self.treeModel.data_object_node(name)
             data_object_node.set_reflect_model(model)
 
         # for the intersection of loaded and old, refresh the plot.
-        refresh_names = [
-            n for n in existing_data_objects if n in loaded_data_objects
-        ]
+        refresh_names = [n for n in existing_data_objects if n in loaded_names]
 
         refresh_data_objects = [datastore[name] for name in refresh_names]
         self.redraw_data_object_graphs(refresh_data_objects)
 
         # for totally new, then add to graphs
-        new_data_objects = [datastore[name] for name in new_names]
+        new_data_objects = [datastore[name] for name in new_objects.keys()]
         self.add_data_objects_to_graphs(new_data_objects)
 
         self.calculate_chi2(data_objects)
 
         # add newly loads to the data object selector dialogue
-        self.data_object_selector.addItems(new_names)
+        self.data_object_selector.addItems(list(new_objects.keys()))
         return fnames
 
     @QtCore.Slot()
@@ -1519,9 +1540,13 @@ class MotofitMainWindow(QtWidgets.QMainWindow):
                         if progress.wasCanceled():
                             raise StopIteration("Sampling aborted")
 
+                _ctx = None
+                if sys.platform == "linux" and sys.version_info < (3, 14):
+                    _ctx = "forkserver"
+
                 with (
                     open(folder / "steps.chain", "w") as f,
-                    get_context().Pool() as workers,
+                    get_context(_ctx).Pool() as workers,
                 ):
                     fitter.sample(
                         nsteps,
